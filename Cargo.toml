@@ -1,0 +1,8 @@
+[package]
+name = "rust_life"
+version = "0.1.0"
+authors = ["mshimko"]
+edition = "2018"
+
+[dependencies]
+rand = "0.3.15"
