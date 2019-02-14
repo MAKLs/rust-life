@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use std::fmt;
 use rand;
 use rand::Rng;
+use std::process;
 
 type Space<T> = Vec<Vec<T>>;
 type Coord = (usize, usize);
 type Cache = HashSet<Coord>;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum Cell {
+pub enum Cell {
     Alive,
     Dead
 }
@@ -39,10 +40,10 @@ impl Cell {
 pub struct Game {
     width: usize,
     height: usize,
-    space: Space<Cell>,
-    cache: Cache,
+    pub space: Space<Cell>,
+    pub cache: Cache,
     max_iter: u32,
-    alive_count: u32,
+    pub alive_count: u32,
 }
 
 impl Game {
@@ -75,20 +76,66 @@ impl Game {
         Ok(())
     }
 
-    fn update_space(&mut self) {
+    fn update(&mut self) {
+        //Successor of current cache
+        let mut new_cache: Cache = HashSet::new();
 
+        for coord in &self.cache {
+            let neighbors = self.get_neighbors(&coord);
+            match self.neighbor_sum(&neighbors) {
+                3 => {
+                    if let Ok(()) = self.space[coord.0][coord.1].revive() {
+                        self.alive_count += 1;
+                        for n in &neighbors {
+                            new_cache.insert(*n);
+                        }
+                    };
+                },
+                4 => continue,
+                _ => {
+                    if let Ok(()) = self.space[coord.0][coord.1].kill() {
+                        self.alive_count -= 1;
+                        for n in &neighbors {
+                            new_cache.insert(*n);
+                        }
+                    };
+                }
+            }
+        }
+
+        self.cache = new_cache;
     }
 
-    fn get_neighbor(&self, coord: &Coord) -> [Coord; 9] {
-        let (x, y) = coord;
-        let (x_0, y_0) = (self.width, self.height);
+    fn get_neighbors(&self, coord: &Coord) -> [Coord; 9] {
+        let (x, y) = *coord;
+        let (x_0, y_0) = (self.width as i32, self.height as i32);
 
-        [*coord;9]
+        [(x, y),
+         ((x as i32 - 1).modulo(x_0) as usize, y),
+         ((x as i32 + 1).modulo(x_0) as usize, y),
+         (x, (y as i32 - 1).modulo(y_0) as usize),
+         (x, (y as i32 + 1).modulo(y_0) as usize),
+         ((x as i32 - 1).modulo(x_0) as usize, (y as i32 - 1).modulo(y_0) as usize),
+         ((x as i32 + 1).modulo(x_0) as usize, (y as i32 - 1).modulo(y_0) as usize),
+         ((x as i32 - 1).modulo(x_0) as usize, (y as i32 + 1).modulo(y_0) as usize),
+         ((x as i32 + 1).modulo(x_0) as usize, (y as i32 + 1).modulo(y_0) as usize),
+        ]
+    }
+
+    fn neighbor_sum(&self, neighbors: &[Coord]) -> u32 {
+        let mut sum: u32 = 0;
+        for n in neighbors {
+            if let Cell::Alive = self.space[n.0][n.1] {
+                sum += 1;
+            };
+        }
+        sum
     }
 }
 
 impl fmt::Display for Game {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Rust Life\n\n")?;
         for row in &self.space {
             let mut line = String::new();
             for cell in row {
@@ -97,8 +144,7 @@ impl fmt::Display for Game {
                     Cell::Dead => "   "
                 });
             }
-            line.push_str("\n");
-            write!(f, "{}", line)?;
+            write!(f, "|{}|\n", line)?;
         }
 
         Ok(())
@@ -109,16 +155,30 @@ pub trait ModuloSignedExt {
     fn modulo(&self, n: Self) -> Self;
 }
 macro_rules! modulo_signed_ext_impl {
-    ($($t:ty)*) => {
-        
-    };
+    ($($t:ty)*) => ($(
+        impl ModuloSignedExt for $t {
+            #[inline]
+            fn modulo(&self, n: Self) -> Self {
+                (self % n + n) % n
+            }
+        }
+    )*)
 }
+modulo_signed_ext_impl! { i8 i16 i32 i64 }
 
 pub fn run() -> Result<(), Box<dyn Error>>{
     let mut game = Game::new(10, 10, 10);
-
     game.init_space(0.5)?;
+
     println!("{}", game);
+    while 0 < game.alive_count {
+        game.update();
+        std::process::Command::new("cmd")
+            .args(&["/c","cls"])
+            .status()
+            .unwrap();
+        println!("{}", game);
+    }
 
     Ok(())
 }
