@@ -1,223 +1,171 @@
 use std::error::Error;
-use std::collections::HashSet;
-use std::fmt;
 use rand;
 use rand::Rng;
-use std::process;
+use std::fmt;
 
 type Space<T> = Vec<Vec<T>>;
-type Coord = (usize, usize);
-type Cache = HashSet<Coord>;
+type Coord = (i32, i32);
 
-#[derive(PartialEq, Debug, Clone, Copy)]
-pub enum Cell {
-    Alive,
-    Dead
+struct Config {
+    row: usize,
+    col: usize,
+    density: f32
 }
 
-impl Cell {
-    fn new() -> Cell {
-        Cell::Dead
-    }
+impl Config {
+    pub fn new<T>(mut args: T) -> Result<Config, &'static str>
+        where T: Iterator<Item = String>
+    {
+        //First argument is program name
+        args.next();
 
-    fn kill(&mut self) -> Result<(), &'static str> {
-        if let Cell::Dead = *self {
-            return Err("cell already dead");
-        }
-        *self = Cell::Dead;
-        Ok(())
-    }
+        let row = match args.next() {
+            Some(arg) => match arg.parse::<usize>() {
+                Ok(val) => val,
+                Err(_) => return Err("row must be positive integer")
+            },
+            None => return Err("not enough arguments")
+        };
+        let col = match args.next() {
+            Some(arg) => match arg.parse::<usize>() {
+                Ok(val) => val,
+                Err(_) => return Err("col must be positive integer")
+            },
+            None => return Err("not enough arguments")
+        };
+        let density = match args.next() {
+            Some(arg) => match arg.parse::<f32>() {
+                Ok(val) => val,
+                Err(_) => return Err("density must be float")
+            },
+            None => return Err("not enough arguments")
+        };
 
-    fn revive(&mut self) -> Result<(), &'static str> {
-        if let Cell::Alive = *self {
-            return Err("cell already alive");
-        }
-        *self = Cell::Alive;
-        Ok(())
+        Ok(Config{row, col, density})
     }
 }
 
-pub struct Game {
-    width: usize,
-    height: usize,
-    pub space: Space<Cell>,
-    pub cache: Cache,
-    max_iter: u32,
-    pub alive_count: u32,
+struct Game {
+    space: Space<bool>,
+    alive_count: u32,
+    size: (usize, usize),
+    generation: u32
 }
 
 impl Game {
-    pub fn new(width: usize, height: usize, max_iter: u32) -> Game {
-        let space = vec![vec![Cell::new(); width]; height];
-        let cache: Cache = HashSet::new();
-
-        Game{width, height, space, cache, max_iter, alive_count: 0u32}
+    pub fn new(row: usize, col: usize) -> Game {
+        Game{space: vec![vec![false; col]; row], alive_count: 0, size: (row, col), generation: 0}
     }
 
-    pub fn init_space(&mut self, density: f32) -> Result<(), &'static str> {
-        //Density must be percent of space that should be alive
+    fn init(&mut self, density: f32) -> Result<(), &'static str> {
         if 0f32 > density || 1f32 < density {
             return Err("density must be within range [0, 1]");
         }
-
-        let mut rng = rand::thread_rng();
-        let target_pop = (self.width * self.height) as f32 * density;
-        let mut coord: Coord;
-
-        //Revive cells randomly in space until we meet the desired density
-        while self.alive_count < target_pop as u32 {
-            coord = (rng.gen_range(0, self.width), rng.gen_range(0, self.height));
-            if let Ok(()) = self.space[coord.0][coord.1].revive() {
-                self.alive_count += 1u32;
-                self.cache.insert(coord);
-            };
+        
+        let target = (self.size.0 * self.size.1) as f32 * density;
+        while target > self.alive_count as f32 {
+            let coord = (rand::thread_rng().gen_range::<usize>(0, self.size.0) as i32, rand::thread_rng().gen_range::<usize>(0, self.size.1) as i32);
+            if !self.cell_state(coord) {
+                self.alive_count += 1;
+                self.set_cell_state(coord, true);
+            }
         }
-
         Ok(())
     }
 
-    fn update(&mut self) {
-        //Successor of current cache
-        let mut new_cache: Cache = HashSet::new();
-
-        for coord in &self.cache {
-            let neighbors = self.get_neighbors(&coord);
-            match self.neighbor_sum(&neighbors) {
-                3 => {
-                    if let Ok(()) = self.space[coord.0][coord.1].revive() {
-                        self.alive_count += 1;
-                        for n in &neighbors {
-                            new_cache.insert(*n);
-                        }
-                    };
-                },
-                4 => continue,
-                _ => {
-                    if let Ok(()) = self.space[coord.0][coord.1].kill() {
-                        self.alive_count -= 1;
-                        for n in &neighbors {
-                            new_cache.insert(*n);
-                        }
-                    };
-                }
-            }
-        }
-
-        self.cache = new_cache;
+    fn set_cell_state(&mut self, coord: Coord, state: bool) {
+        let (row, col) = coord;
+        self.space[row as usize][col as usize] = state;
     }
 
-    fn get_neighbors(&self, coord: &Coord) -> [Coord; 9] {
-        let (x, y) = *coord;
-        let (x_0, y_0) = (self.width as i32, self.height as i32);
+    fn cell_state(&self, coord: Coord) -> bool {
+        let (row, col) = coord;
+        match self.space.iter().nth(row as usize) {
+            Some(row) => match row.iter().nth(col as usize) {
+                Some(cell) => *cell,
+                None => false
+            },
+            None => false
+        }
+    }
 
+    fn neighbors(&self, coord: Coord) -> [Coord; 9] {
+        let (x, y) = coord;
         [(x, y),
-         ((x as i32 - 1).modulo(x_0) as usize, y),
-         ((x as i32 + 1).modulo(x_0) as usize, y),
-         (x, (y as i32 - 1).modulo(y_0) as usize),
-         (x, (y as i32 + 1).modulo(y_0) as usize),
-         ((x as i32 - 1).modulo(x_0) as usize, (y as i32 - 1).modulo(y_0) as usize),
-         ((x as i32 + 1).modulo(x_0) as usize, (y as i32 - 1).modulo(y_0) as usize),
-         ((x as i32 - 1).modulo(x_0) as usize, (y as i32 + 1).modulo(y_0) as usize),
-         ((x as i32 + 1).modulo(x_0) as usize, (y as i32 + 1).modulo(y_0) as usize),
+         (x + 1, y),
+         (x - 1, y),
+         (x, y + 1),
+         (x, y - 1),
+         (x + 1, y + 1),
+         (x + 1, y - 1),
+         (x - 1, y + 1),
+         (x - 1, y - 1)
         ]
     }
 
-    fn neighbor_sum(&self, neighbors: &[Coord]) -> u32 {
-        let mut sum: u32 = 0;
-        for n in neighbors {
-            if let Cell::Alive = self.space[n.0][n.1] {
-                sum += 1;
-            };
+    fn next_cell_state(&self, coord: Coord) -> bool {
+        let neighbors = self.neighbors(coord);
+        match neighbors.iter()
+                .map(|c| self.cell_state(*c))
+                .filter(|c| *c)
+                .collect::<Vec<_>>()
+                .len()
+        {
+            3 => true,
+            4 => self.cell_state(coord),
+            _ => false
         }
-        sum
+    }
+
+    fn next(&mut self) {
+        let mut new_space: Space<bool> = Vec::new();
+        for (i, row) in self.space.iter().enumerate() {
+            new_space.push(self.next_row(row, i as i32));
+        }
+        self.space = new_space;
+        self.generation += 1;
+    }
+
+    fn next_row(&self, row: &[bool], x: i32) -> Vec<bool> {
+        row.iter()
+            .enumerate()
+            .map(|(y,_)| self.next_cell_state((x, y as i32)))
+            .collect()
     }
 }
 
+
 impl fmt::Display for Game {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Rust Life\n\n")?;
+        write!(f, "\rRust Life: Generation {}\n\n", self.generation)?;
         for row in &self.space {
             let mut line = String::new();
             for cell in row {
                 line.push_str(match cell {
-                    Cell::Alive => " * ",
-                    Cell::Dead => "   "
+                    true => "*",
+                    false => " "
                 });
             }
-            write!(f, "|{}|\n", line)?;
+            write!(f, "\r|{}|\n", line)?;
         }
 
         Ok(())
     }
 }
 
-pub trait ModuloSignedExt {
-    fn modulo(&self, n: Self) -> Self;
-}
-macro_rules! modulo_signed_ext_impl {
-    ($($t:ty)*) => ($(
-        impl ModuloSignedExt for $t {
-            #[inline]
-            fn modulo(&self, n: Self) -> Self {
-                (self % n + n) % n
-            }
-        }
-    )*)
-}
-modulo_signed_ext_impl! { i8 i16 i32 i64 }
-
-pub fn run() -> Result<(), Box<dyn Error>>{
-    let mut game = Game::new(10, 10, 10);
-    game.init_space(0.5)?;
+pub fn run<T>(args: T) -> Result<(), Box<dyn Error>> 
+    where T: Iterator<Item = String>
+{
+    let config = Config::new(args)?;
+    let mut game = Game::new(config.row, config.col);
+    game.init(config.density)?;
 
     println!("{}", game);
-    while 0 < game.alive_count {
-        game.update();
-        std::process::Command::new("cmd")
-            .args(&["/c","cls"])
-            .status()
-            .unwrap();
-        println!("{}", game);
+    while game.generation < 1_000_000 {
+        game.next();
+        println!("{}\n", game);
+        std::thread::sleep(std::time::Duration::from_millis(30));
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn new_cell() {
-        let cell = Cell::new();
-        
-        assert_eq!(cell, Cell::Dead);
-    }
-
-    #[test]
-    fn revive_cell() {
-        let mut cell = Cell::new();
-        assert_eq!(cell, Cell::Dead);
-
-        if let Err(e) = cell.revive() {
-            panic!("{}", e);
-        };
-        assert_eq!(cell, Cell::Alive);
-    }
-
-    #[test]
-    fn kill_cell() {
-        let mut cell = Cell::new();
-        assert_eq!(cell, Cell::Dead);
-
-        if let Err(e) = cell.revive() {
-            panic!("{}", e);
-        };
-        assert_eq!(cell, Cell::Alive);
-
-        if let Err(e) = cell.kill() {
-            panic!("{}", e);
-        };
-        assert_eq!(cell, Cell::Dead);
-    }
 }
