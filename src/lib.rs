@@ -2,9 +2,11 @@ use std::error::Error;
 use rand;
 use rand::Rng;
 use std::fmt;
+use std::collections::HashSet;
 
 type Space<T> = Vec<Vec<T>>;
 type Coord = (i32, i32);
+type Cache = HashSet<(i32, i32)>;
 
 struct Config {
     row: usize,
@@ -46,7 +48,9 @@ impl Config {
 }
 
 struct Game {
-    space: Space<bool>,
+    space: Box<Space<bool>>,
+    next_space: Box<Space<bool>>,
+    cache: Cache,
     alive_count: u32,
     size: (usize, usize),
     generation: u32
@@ -54,7 +58,11 @@ struct Game {
 
 impl Game {
     pub fn new(row: usize, col: usize) -> Game {
-        Game{space: vec![vec![false; col]; row], alive_count: 0, size: (row, col), generation: 0}
+        let space = Box::new(vec![vec![false; col]; row]);
+        let next_space = Box::new(vec![vec![false; col]; row]);
+        let cache: Cache = Cache::new();
+
+        Game{space, next_space, cache, alive_count: 0, size: (row, col), generation: 0}
     }
 
     fn init(&mut self, density: f32) -> Result<(), &'static str> {
@@ -63,19 +71,37 @@ impl Game {
         }
         
         let target = (self.size.0 * self.size.1) as f32 * density;
-        while target > self.alive_count as f32 {
+        while self.alive_count < target as u32 {
             let coord = (rand::thread_rng().gen_range::<usize>(0, self.size.0) as i32, rand::thread_rng().gen_range::<usize>(0, self.size.1) as i32);
             if !self.cell_state(coord) {
-                self.alive_count += 1;
-                self.set_cell_state(coord, true);
+                //If cell is not alive yet: 
+                // 1. Increment alive_count
+                // 2. Set cell state in both spaces
+                // 3. Insert cell and neighbors into cache
+                self.alive_count += 1u32;
+                self.set_cell_state(coord, true, true);
+                self.insert_cache(self.neighbors(coord));
             }
         }
         Ok(())
     }
 
-    fn set_cell_state(&mut self, coord: Coord, state: bool) {
+    fn set_cell_state(&mut self, coord: Coord, state: bool, both: bool) {
+        //Set the cell state in the next space
         let (row, col) = coord;
-        self.space[row as usize][col as usize] = state;
+        self.next_space[row as usize][col as usize] = state;
+
+        if both {
+            self.space[row as usize][col as usize] = state;
+        }
+    }
+
+    fn insert_cache(&mut self, coords: [Coord; 9]) {
+        for c in &coords {
+            if c.0 >= 0 && c.1 >= 0 && self.size.0 > c.0 as usize && self.size.1 > c.1 as usize {
+                self.cache.insert(*c);
+            }
+        }
     }
 
     fn cell_state(&self, coord: Coord) -> bool {
@@ -103,7 +129,7 @@ impl Game {
         ]
     }
 
-    fn next_cell_state(&self, coord: Coord) -> bool {
+    fn next_cell_state(&mut self, coord: Coord) -> Option<[Coord; 9]> {
         let neighbors = self.neighbors(coord);
         match neighbors.iter()
                 .map(|c| self.cell_state(*c))
@@ -111,34 +137,46 @@ impl Game {
                 .collect::<Vec<_>>()
                 .len()
         {
-            3 => true,
-            4 => self.cell_state(coord),
-            _ => false
+            3 => {
+                if !self.cell_state(coord) {
+                    //Cell revived
+                    self.set_cell_state(coord, true, false);
+                    self.alive_count += 1u32;
+                }
+                Some(neighbors)
+            },
+            4 => None,
+            _ => {
+                if self.cell_state(coord) {
+                    //Cell died
+                    self.set_cell_state(coord, false, false);
+                    self.alive_count -= 1u32;
+                }
+                Some(neighbors)
+            }
         }
     }
 
     fn next(&mut self) {
-        let mut new_space: Space<bool> = Vec::new();
-        for (i, row) in self.space.iter().enumerate() {
-            new_space.push(self.next_row(row, i as i32));
+        let cache = self.cache.clone();
+        self.cache = Cache::new();
+        //Iterate through cache and update next space
+        for coord in cache.iter() {
+            if let Some(neighbors) = self.next_cell_state(*coord) {
+                self.insert_cache(neighbors);
+            };
         }
-        self.space = new_space;
+        self.space = self.next_space.clone();
+        self.next_space = Box::new(*self.space.clone());
         self.generation += 1;
-    }
-
-    fn next_row(&self, row: &[bool], x: i32) -> Vec<bool> {
-        row.iter()
-            .enumerate()
-            .map(|(y,_)| self.next_cell_state((x, y as i32)))
-            .collect()
     }
 }
 
 
 impl fmt::Display for Game {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "\rRust Life: Generation {}\n\n", self.generation)?;
-        for row in &self.space {
+        write!(f, "\rRust Life:\n\tGeneration {}\n\tAlive {}\n\n", self.generation, self.alive_count)?;
+        for row in self.space.iter() {
             let mut line = String::new();
             for cell in row {
                 line.push_str(match cell {
@@ -161,11 +199,50 @@ pub fn run<T>(args: T) -> Result<(), Box<dyn Error>>
     game.init(config.density)?;
 
     println!("{}", game);
-    while game.generation < 1_000_000 {
+    while game.generation < 1_000_000 && game.alive_count > 0 {
         game.next();
-        println!("{}\n", game);
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        
+        println!("{}\n", game.generation);
+        //std::thread::sleep(std::time::Duration::from_millis(30));
+        //std::process::Command::new("cmd").args(&["/c","cls"]).status().unwrap();
     }
 
     Ok(())
+}
+
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_cell_in_current_space() {
+        let mut game = Game::new(10, 10);
+        //Cell state is false initially
+        assert!(!game.cell_state((0, 0)));
+
+        game.set_cell_state((0, 0), true, true);
+        assert!(game.cell_state((0, 0)));
+    }
+    
+    #[test]
+    fn initialize_space_with_density() {
+        let row = 10;
+        let col = 10;
+        let density = 0.711;
+
+        let mut game = Game::new(row, col);
+        if let Err(e) = game.init(density)
+        {
+            panic!("Test failed: {}", e);
+        };
+
+        let expected_count = (10f32 * 10f32 * density).ceil();
+        let alive_count: usize = game.space.iter()
+                                        .flat_map(|row| row.iter().filter(|cell| **cell))
+                                        .collect::<Vec<&bool>>()
+                                        .len();
+        assert_eq!(alive_count, expected_count as usize,
+            "expected {} living cells, observed {}", expected_count as usize, alive_count);
+        assert_eq!(game.cache.len(), expected_count as usize,
+            "expected {} items in cache", expected_count);
+    }
 }
