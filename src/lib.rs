@@ -21,6 +21,7 @@ impl Config {
         //First argument is program name
         args.next();
 
+        //Unpack arguments
         let row = match args.next() {
             Some(arg) => match arg.parse::<usize>() {
                 Ok(val) => val,
@@ -47,10 +48,10 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
 struct Game {
     space: Space,
     cache: Box<Space>,
-    alive_count: usize,
     size: (usize, usize),
     generation: usize
 }
@@ -58,7 +59,7 @@ struct Game {
 impl Game {
     pub fn new(row: usize, col: usize) -> Game {
 
-        Game{space: Space::new(), cache: Box::new(Space::new()), alive_count: 0, size: (row, col), generation: 0}
+        Game{space: Space::new(), cache: Box::new(Space::new()), size: (row, col), generation: 0}
     }
 
     fn init(&mut self, density: f32) -> Result<(), &'static str> {
@@ -67,31 +68,38 @@ impl Game {
         }
         
         let target = (self.size.0 * self.size.1) as f32 * density;
-        while self.alive_count < target as usize {
-            let coord = (rand::thread_rng().gen_range::<usize>(0, self.size.0) as i32, rand::thread_rng().gen_range::<usize>(0, self.size.1) as i32);
+        while self.alive() < target as usize {
+            let coord = (rand::thread_rng().gen_range::<usize>(0, self.size.0) as i32,
+                rand::thread_rng().gen_range::<usize>(0, self.size.1) as i32);
             if !self.cell_state(coord) {
                 self.set_cell_state(coord);
-                self.insert_cache(self.neighbors(coord));
+                self.insert_cache(&self.neighbors(coord));
             }
         }
+
         Ok(())
     }
 
     pub fn alive(&self) -> usize {
-        self.alive_count
+        //Get count of living cells
+        self.space.len()
     }
 
     pub fn generation(&self) -> usize {
+        //Get count of generations passed
         self.generation
     }
 
     fn set_cell_state(&mut self, coord: Coord) {
+        //Set cell state to living during initialization
         self.space.insert(coord);
-        self.alive_count += 1;
     }
 
-    fn insert_cache(&mut self, coords: [Coord; 9]) {
-        for c in &coords {
+    fn insert_cache<'a, T>(&'a mut self, coords: T) 
+        where T: IntoIterator<Item = &'a (i32, i32)>
+    {
+        //Insert collection of coordinates into cache
+        for c in coords {
             if c.0 >= 0 && c.1 >= 0 && self.size.0 > c.0 as usize && self.size.1 > c.1 as usize {
                 self.cache.insert(*c);
             }
@@ -99,12 +107,13 @@ impl Game {
     }
 
     fn cell_state(&self, coord: Coord) -> bool {
+        //Determine whether cell is living
         self.space.contains(&coord)
     }
 
-    fn neighbors(&self, coord: Coord) -> [Coord; 9] {
+    fn neighbors(&self, coord: Coord) -> [Coord; 8] {
         let (x, y) = coord;
-        [(x, y),
+        [
          (x + 1, y),
          (x - 1, y),
          (x, y + 1),
@@ -116,33 +125,42 @@ impl Game {
         ]
     }
 
-    fn next_cell_state(&mut self, coord: Coord) -> (bool, Option<[Coord; 9]>) {
+    fn next_cell_state(&self, coord: Coord) -> (bool, Option<[Coord; 8]>) {
+        //Check cell's neighbors to determine next state
+        //Return 1. Cell's next state
+        //       2. Cell's neighbors (if state changed)
         let neighbors = self.neighbors(coord);
+        let curr_cell = if self.cell_state(coord) {
+            1
+        } else {
+            0
+        };
         match neighbors.iter()
                 .map(|c| self.cell_state(*c))
                 .filter(|c| *c)
                 .collect::<Vec<_>>()
-                .len()
+                .len() + curr_cell
         {
             3 => {
-                if !self.cell_state(coord) {
-                    //Cell revived
-                    self.alive_count += 1usize;
+                if 0 == curr_cell {
+                    //Cell revived, need to check neighbors
+                    return (true, Some(neighbors));
                 }
-                (true, Some(neighbors))
+                (true, None)
             },
-            4 => (self.cell_state(coord), None),
+            4 => (1 == curr_cell, None),
             _ => {
-                if self.cell_state(coord) {
-                    //Cell died
-                    self.alive_count -= 1usize;
+                if 1 == curr_cell {
+                    //Cell died, need to check neighbors
+                    return (false, Some(neighbors));
                 }
-                (false, Some(neighbors))
+                (false, None)
             }
         }
     }
 
     fn next(&mut self) {
+        //Calculate next generation of Game
         let cache = self.cache.clone();
         let mut next_space = Space::new();
         self.cache = Box::new(Space::new());
@@ -150,10 +168,13 @@ impl Game {
         for coord in cache.iter() {
             let next_state = self.next_cell_state(*coord);
             if next_state.0 {
+                //Add cell to space and cache if living
+                self.insert_cache(&[*coord]);
                 next_space.insert(*coord);
             }
             if let Some(neighbors) = next_state.1 {
-                self.insert_cache(neighbors);
+                //Cache cell's neighbors if cell's state changed
+                self.insert_cache(&neighbors);
             };
         }
 
@@ -164,7 +185,7 @@ impl Game {
 
 impl fmt::Display for Game {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Rust Life:\n\tGeneration {}\n\tAlive {}\n\n", self.generation, self.alive_count)?;
+        write!(f, "Rust Life:\n\tGeneration {}\n\tAlive {}\n\n", self.generation(), self.alive())?;
         for row in 0..self.size.0 {
             let mut row_str = String::new();
             for col in 0..self.size.1 {
@@ -191,9 +212,11 @@ pub fn run<T>(args: T) -> Result<(), Box<dyn Error>>
     while game.generation() < 1_000_000 && game.alive() > 0 {
         println!("{}{}", "\n".repeat(config.row+4), game);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        //println!("{}", game.generation());
+        //println!("{} -- {}", game.generation(), game.alive());
         game.next();
     }
+
+    println!("{}{}", "\n".repeat(config.row+4), game);
 
     Ok(())
 }
@@ -261,7 +284,7 @@ mod tests {
         for cell in &cells {
             let neighbors = game.neighbors(*cell);
             game.set_cell_state(*cell);
-            game.insert_cache(neighbors);
+            game.insert_cache(&neighbors);
         }
     }
 }
